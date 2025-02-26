@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using Kusto.Language;
 using Kusto.Language.Symbols;
@@ -8,6 +7,26 @@ namespace KQLAnalyzer
 {
     public static class KustoAnalyzer
     {
+        public static bool IsDatabaseTableColumn(ColumnSymbol column, GlobalState globals)
+        {
+            return globals.GetTable(column) != null;
+        }
+
+        public static void AddDatabaseTableColumns(ColumnSymbol column, GlobalState globals, HashSet<ColumnSymbol> columns)
+        {
+            if (IsDatabaseTableColumn(column, globals))
+            {
+                columns.Add(column);
+            }
+            else if (column.OriginalColumns.Count > 0)
+            {
+                foreach (var originalColumn in column.OriginalColumns)
+                {
+                    AddDatabaseTableColumns(originalColumn, globals, columns);
+                }
+            }
+        }
+
         // This function was taken from
         // https://github.com/microsoft/Kusto-Query-Language/blob/master/src/Kusto.Language/readme.md
         public static HashSet<TableSymbol> GetDatabaseTables(KustoCode code)
@@ -66,6 +85,35 @@ namespace KQLAnalyzer
 
         // This function was taken from
         // https://github.com/microsoft/Kusto-Query-Language/blob/master/src/Kusto.Language/readme.md
+
+        public static HashSet<ColumnSymbol> GetDatabaseTableColumns(KustoCode code)
+        {
+            var columns = new HashSet<ColumnSymbol>();
+            GatherColumns(code.Syntax);
+            return columns;
+
+            void GatherColumns(SyntaxNode root)
+            {
+                SyntaxElement.WalkNodes(root,
+                    fnBefore: n =>
+                    {
+                        if (n.ReferencedSymbol is ColumnSymbol c)
+                        {
+                            AddDatabaseTableColumns(c, code.Globals, columns);
+                        }
+                        else if (n.GetCalledFunctionBody() is SyntaxNode body)
+                        {
+                            GatherColumns(body);
+                        }
+                    },
+                    fnDescend: n =>
+                        // skip descending into function declarations since their bodies will be examined by the code above
+                        !(n is FunctionDeclaration)
+                    );
+            }
+        }
+
+        /*
         public static HashSet<ColumnSymbol> GetDatabaseTableColumns(KustoCode code)
         {
             var columns = new HashSet<ColumnSymbol>();
@@ -95,7 +143,7 @@ namespace KQLAnalyzer
                 );
             }
         }
-
+        */
         // Helper function that will resolve an expression to a string.
         // It supports constants as well as applications of strcat with constant
         // arguments.
@@ -246,13 +294,26 @@ namespace KQLAnalyzer
             var code = KustoCode.ParseAndAnalyze(query, myGlobals);
 
             queryResults.ParsingErrors = code.GetDiagnostics().ToList();
+
             queryResults.ReferencedTables = GetDatabaseTables(code).Select(t => t.Name).ToList();
+            queryResults.ReferencedTables.Sort();
+
             queryResults.ReferencedFunctions = GetDatabaseFunctions(code)
                 .Select(t => t.Name)
                 .ToList();
-            queryResults.ReferencedColumns = GetDatabaseTableColumns(code)
+            queryResults.ReferencedFunctions.Sort();
+
+            var refcolumns = GetDatabaseTableColumns(code);
+            queryResults.ReferencedColumns = refcolumns
                 .Select(t => t.Name)
                 .ToList();
+            queryResults.ReferencedColumns.Sort();
+
+            queryResults.ReferencedTablesWithColumns = refcolumns
+                .Select(c => code.Globals.GetTable(c).Name + ":" + c.Name)
+                .ToList();
+            queryResults.ReferencedTablesWithColumns.Sort();
+
             if (code.ResultType != null)
             {
                 queryResults.OutputColumns = code.ResultType.Members
